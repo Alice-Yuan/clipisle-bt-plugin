@@ -4,6 +4,15 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class PluginSettingsPagesTest {
+    @Test fun onlinePreviewChoiceUsesPluginOwnedSettingsAndDeclaresDisclosure() {
+        for (enabled in listOf(true, false)) {
+            val page = PluginSettingsPages.settings(mapOf("onlinePreviewEnabled" to enabled))["page"] as Map<*, *>
+            val field = (page["fields"] as List<*>).filterIsInstance<Map<*, *>>().single { it["id"] == "onlinePreviewEnabled" }
+            assertEquals(enabled, field["value"])
+            assertEquals("仅向 whatslink.info 发送资源哈希", field["subtitle"])
+            assertEquals("saveSettings", page["autoSaveAction"])
+        }
+    }
     @Test fun decimalLimitsRoundTripWithoutChangingTheirMeaning() {
         for (bytes in listOf(0, 1, 128000, 524288, Int.MAX_VALUE)) {
             assertEquals(bytes, PluginSettingsPages.parseRate(PluginSettingsPages.rateToUi(bytes)))

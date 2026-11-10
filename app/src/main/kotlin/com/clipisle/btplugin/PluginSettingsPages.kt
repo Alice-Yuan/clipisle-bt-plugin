@@ -7,8 +7,9 @@ internal object PluginSettingsPages {
     fun settings(settings: Map<String, Any>): Map<String, Any> = page(
         "settings", "磁力下载设置",
         autoSaveAction = "saveSettings",
-        sections = listOf(section("network", "网络与任务", "network"), section("speed", "传输速度", "speed"), section("sources", "连接来源", "tracker")),
+        sections = listOf(section("preview", "内容预览", "image"), section("network", "网络与任务", "network"), section("speed", "传输速度", "speed"), section("sources", "连接来源", "tracker")),
         fields = listOf(
+            mapOf("id" to "onlinePreviewEnabled", "type" to "switch", "section" to "preview", "icon" to "image", "label" to "在线内容预览", "subtitle" to "仅向 whatslink.info 发送资源哈希", "value" to (settings["onlinePreviewEnabled"] ?: true)),
             mapOf("id" to "unmeteredOnly", "type" to "switch", "section" to "network", "icon" to "network", "label" to "仅在非计费网络下载", "subtitle" to "通常为 Wi-Fi", "value" to (settings["unmeteredOnly"] ?: true)),
             mapOf("id" to "maxActiveDownloads", "type" to "select", "section" to "network", "icon" to "download", "label" to "同时下载任务", "value" to (settings["maxActiveDownloads"] ?: 1).toString(), "options" to listOf(option("1", "1"), option("2", "2"))),
             rate("downloadRateLimit", "下载限速", settings["downloadRateLimit"]),

@@ -5,6 +5,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PreviewLookupTest {
+    private val magnet = "magnet:?xt=urn:btih:" + "a".repeat(40)
     private val folderPayload = """
         {"error":"","type":"FOLDER","file_type":"folder","name":"Big Buck Bunny",
          "size":276445467,"count":3,"screenshots":[
@@ -53,11 +54,11 @@ class PreviewLookupTest {
     }
 
     @Test
-    fun `declared error becomes failure with the service message`() {
+    fun `declared error does not expose remote text or URLs`() {
         val payload = """{"error":"Query failed, please try again later."}"""
         val preview = PreviewLookup.parse("x", payload)
         preview as PreviewLookup.Preview.Failed
-        assertEquals("Query failed, please try again later.", preview.reason)
+        assertEquals("暂时无法获取预览，可以直接选择文件", preview.reason)
     }
 
     @Test
@@ -94,16 +95,56 @@ class PreviewLookupTest {
 
     @Test
     fun `transport error is surfaced as failure`() {
-        val preview = PreviewLookup.lookup("magnet:?xt=urn:btih:abc") { throw java.io.IOException("offline") }
+        val preview = PreviewLookup.lookup(magnet) { throw java.io.IOException("https://secret/?token=private") }
         preview as PreviewLookup.Preview.Failed
-        assertEquals("offline", preview.reason)
+        assertEquals("暂时无法获取预览，可以直接选择文件", preview.reason)
     }
 
     @Test
     fun `lookup encodes the target into the query`() {
         var seen = ""
-        PreviewLookup.lookup("magnet:?xt=urn:btih:abc&dn=a b") { seen = it; folderPayload }
+        PreviewLookup.lookup("$magnet&dn=a%20b&tr=https%3A%2F%2Fprivate.example%2Ftoken") { seen = it; folderPayload }
         assertTrue(seen.startsWith("https://whatslink.info/api/v1/link?url="))
         assertTrue("参数必须完整编码", !seen.substringAfter("url=").contains("&dn="))
+        assertEquals(magnet, java.net.URLDecoder.decode(seen.substringAfter("url="), "UTF-8"))
+    }
+
+    @Test fun `original input survives but tracker credentials are never uploaded`() {
+        val original = "$magnet&dn=Private%20Name&tr=https%3A%2F%2Ftracker.example%2Fpasskey&xs=https%3A%2F%2Fseed.example%2Fsecret"
+        var seen = ""
+        val result = PreviewLookup.lookup(original) { seen = it; folderPayload }
+        assertEquals(original, result.input)
+        assertEquals(magnet, java.net.URLDecoder.decode(seen.substringAfter("url="), "UTF-8"))
+        assertTrue(!seen.contains("private", true) && !seen.contains("passkey", true))
+    }
+
+    @Test fun `non magnet targets and malformed hashes never call transport`() {
+        for (input in listOf("https://private.example/?token=secret", "file:///private", "magnet:?xt=urn:btih:abc", "magnet:?xt=urn:btih:" + "g".repeat(40))) {
+            var called = false
+            val result = PreviewLookup.lookup(input) { called = true; folderPayload }
+            assertTrue(result is PreviewLookup.Preview.Failed)
+            assertTrue(!called)
+        }
+    }
+
+    @Test fun `hybrid identity preserves hashes and removes unrelated parameters`() {
+        val v2 = "1220" + "b".repeat(64)
+        assertEquals("$magnet&xt=urn:btmh:$v2", PreviewLookup.publicIdentity("$magnet&xt=urn:btmh:$v2&dn=private"))
+    }
+
+    @Test fun `unknown or malformed facts are omitted instead of invented`() {
+        for (facts in listOf("", ",\"size\":-1,\"count\":-2", ",\"size\":1.5,\"count\":2.5", ",\"size\":9223372036854775808,\"count\":2147483648")) {
+            val known = PreviewLookup.parse("x", "{\"type\":\"FILE\",\"name\":\"a\"$facts}") as PreviewLookup.Preview.Known
+            assertEquals(null, known.sizeBytes)
+            assertEquals(null, known.fileCount)
+        }
+        assertTrue(PreviewLookup.parse("x", "{\"type\":\"SOMETHING\",\"name\":\"a\"}") is PreviewLookup.Preview.Unknown)
+    }
+
+    @Test fun `image URLs must stay on the public service origin`() {
+        val rejected = listOf("https://127.0.0.1/image/a", "https://whatslink.info:444/image/a", "https://user@whatslink.info/image/a", "https://whatslink.info/image/a#x", "https://whatslink.info.evil.test/image/a", "https://whatslink.info/api/v1/link")
+        val shots = rejected.joinToString(",") { "{\"screenshot\":\"$it\"}" }
+        val known = PreviewLookup.parse("x", "{\"type\":\"FILE\",\"name\":\"a\",\"screenshots\":[$shots]}") as PreviewLookup.Preview.Known
+        assertTrue(known.screenshots.isEmpty())
     }
 }

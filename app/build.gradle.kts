@@ -6,7 +6,7 @@ val releaseKeys = Properties().apply { if (releaseKeysFile.isFile) releaseKeysFi
 android {
  namespace = "com.clipisle.btplugin"
  compileSdk = 36
- defaultConfig { applicationId = "com.clipisle.btplugin"; minSdk = 26; targetSdk = 36; versionCode = 3; versionName = "1.0.2" }
+ defaultConfig { applicationId = "com.clipisle.btplugin"; minSdk = 26; targetSdk = 36; versionCode = 4; versionName = "1.1.0" }
  signingConfigs {
   if (releaseKeysFile.isFile) create("release") {
    storeFile = rootProject.file(requireNotNull(releaseKeys.getProperty("storeFile")))
