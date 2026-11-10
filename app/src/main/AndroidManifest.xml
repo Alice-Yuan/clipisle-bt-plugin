@@ -5,7 +5,7 @@
  <queries><package android:name="com.clipisle.app"/></queries>
  <application android:label="ClipIsle BT" android:allowBackup="false" android:largeHeap="true" android:usesCleartextTraffic="true">
   <activity android:name=".PluginAccessActivity" android:exported="true"><intent-filter><action android:name="com.clipisle.plugin.AUTHORIZE"/><category android:name="android.intent.category.DEFAULT"/></intent-filter></activity>
-  <activity android:name=".TransferConfirmActivity" android:exported="true"><intent-filter><action android:name="com.clipisle.plugin.CONFIRM_TRANSFER"/><category android:name="android.intent.category.DEFAULT"/></intent-filter></activity>
+  <activity android:name=".TransferConfirmActivity" android:exported="true" android:theme="@style/TransferBridgeTheme" android:configChanges="orientation|screenSize|keyboardHidden|uiMode"><intent-filter><action android:name="com.clipisle.plugin.CONFIRM_TRANSFER"/><category android:name="android.intent.category.DEFAULT"/></intent-filter></activity>
   <service android:name=".PluginService" android:exported="true"><intent-filter><action android:name="com.clipisle.plugin.BIND"/></intent-filter><meta-data android:name="com.clipisle.plugin.manifest" android:resource="@string/plugin_manifest"/></service>
   <provider android:name=".ExportProvider" android:authorities="com.clipisle.btplugin.exports" android:exported="false" android:grantUriPermissions="true"/>
   <receiver android:name="com.clipisle.app.bt.BtNotificationReceiver" android:exported="false"/>

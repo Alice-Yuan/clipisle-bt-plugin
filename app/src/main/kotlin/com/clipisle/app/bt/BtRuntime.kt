@@ -41,6 +41,7 @@ class BtRuntime private constructor(private val appContext: Context) {
     }
     private val queue = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "bt-runtime").apply { isDaemon = true } }
     private val metadataWorker = Executors.newSingleThreadExecutor { r -> Thread(r, "bt-metadata").apply { isDaemon = true } }
+    private val metadataWatchdog = ScheduledThreadPoolExecutor(1) { r -> Thread(r, "bt-metadata-deadline").apply { isDaemon = true } }.apply { removeOnCancelPolicy = true }
     private val store = BtTaskStore(appContext)
     private val prefs = appContext.getSharedPreferences("clipisle_bt", Context.MODE_PRIVATE)
     private val networkPolicy = BtNetworkPolicy(appContext)
@@ -86,6 +87,8 @@ class BtRuntime private constructor(private val appContext: Context) {
     private var owner: String? = null
     private var pendingOwner: String? = null
     private var discoveryEnabled = true
+    private data class DhtObservation(val nodes: Long, val observedAtMs: Long)
+    @Volatile private var dhtObservation: DhtObservation? = null
     private var lastCheckpoint = 0L
     private var lastNotification = 0L
     private var maxActive = prefs.getInt("maxActive", 1).coerceIn(1, 2)
@@ -94,6 +97,7 @@ class BtRuntime private constructor(private val appContext: Context) {
     private val tasks = LinkedHashMap<String, Task>()
     private val metadata = LinkedHashMap<String, Metadata>()
     private var resolving: Resolve? = null
+    private val pendingResolveCancels = BtPendingResolveCancels()
     private val deleting = HashMap<String, CompletableFuture<Map<String, Any>>>()
 
     private data class Task(var record: BtTaskRecord, var handle: TorrentHandle? = null,
@@ -261,6 +265,7 @@ class BtRuntime private constructor(private val appContext: Context) {
         session?.let { setDiscoveryEnabled(allowDiscovery); return it }
         val settings = SettingsPack().apply {
             setEnableLsd(false); setEnableDht(allowDiscovery); setMaxMetadataSize(MAX_METADATA)
+            setDhtBootstrapNodes(BtDhtBootstrap.settingsValue)
             setBoolean(com.frostwire.jlibtorrent.swig.settings_pack.bool_types.prefer_udp_trackers.swigValue(), false)
             connectionsLimit(80); downloadRateLimit(downloadLimit); uploadRateLimit(uploadLimit)
         }
@@ -291,6 +296,20 @@ class BtRuntime private constructor(private val appContext: Context) {
                             AddTorrentParams.writeResumeData(alert.params()).bencode() else null
                         dispatch { onCheckpoint(v1, v2, bytes) }
                     } catch (_: Exception) { Log.w(TAG, "resume alert could not be copied") }
+                }
+            })
+
+            // The library emits session statistics periodically; copy the scalar
+            // while the borrowed alert is live. Do not retain hashes or peers.
+            s.addListener(object : AlertListener {
+                override fun types(): IntArray = intArrayOf(AlertType.SESSION_STATS.swig())
+                override fun alert(alert: Alert<*>) {
+                    try {
+                        if (alert is SessionStatsAlert && StatsMetric.DHT_NODES_GAUGE_INDEX >= 0) {
+                            val nodes = alert.value(StatsMetric.DHT_NODES_GAUGE_INDEX)
+                            if (nodes >= 0) dhtObservation = DhtObservation(nodes, android.os.SystemClock.elapsedRealtime())
+                        }
+                    } catch (_: Exception) { /* Statistics are best effort only. */ }
                 }
             })
 
@@ -365,7 +384,21 @@ class BtRuntime private constructor(private val appContext: Context) {
     // fetchMagnet's timeout is SECONDS. Interrupting its latch also runs its handle cleanup.
     fun resolveMagnet(magnet: String, requestId: String, timeoutMs: Int = 90000): Future<Map<String, Any>> {
         val result = CompletableFuture<Map<String, Any>>()
+        if (!BtPendingResolveCancels.valid(requestId)) {
+            result.complete(fail("INVALID_ARGUMENT", "解析请求标识无效"))
+            return result
+        }
+        val startedAtMs = android.os.SystemClock.elapsedRealtime()
+        val deadlineMs = timeoutMs.coerceIn(1000, 90000)
+        BtMetadataDeadline.arm(metadataWatchdog, result, deadlineMs.toLong() + 5000,
+            { metadataTimeout(startedAtMs) },
+            { dispatch { resolving?.takeIf { it.result === result }?.let { cancelPreview(it); releaseIfIdle() } } })
         dispatch {
+            if (pendingResolveCancels.consume(requestId, android.os.SystemClock.elapsedRealtime())) {
+                result.complete(fail("CANCELED", "操作已取消"))
+                return@dispatch
+            }
+            if (result.isDone) return@dispatch
             try {
                 load()
                 val parsed = BtInput.parse(magnet)
@@ -394,20 +427,25 @@ class BtRuntime private constructor(private val appContext: Context) {
                 if (!networkPolicy.isSatisfied()) { result.complete(fail("WAITING_NETWORK", "当前网络不符合下载策略")); return@dispatch }
                 if (resolving != null) { result.complete(fail("METADATA_BUSY", "正在获取文件列表，请稍后重试")); return@dispatch }
                 val s = ensureSession()
+                if (result.isDone) { releaseIfIdle(); return@dispatch }
                 s.resume()
                 val request = Resolve(requestId, result)
                 resolving = request
                 setDiscoveryEnabled(true)
                 val directory = File(appContext.cacheDir, "bt-metadata").apply { mkdirs() }
                 request.worker = metadataWorker.submit {
-                    val bytes = runCatching { s.fetchMagnet(info.magnet,
-                        ((timeoutMs.coerceIn(1000, 90000) + 999) / 1000), directory) }.getOrNull()
+                    val fetched = runCatching { s.fetchMagnet(info.magnet,
+                        ((deadlineMs + 999) / 1000), directory) }
                     dispatch {
                         // Do not release the concurrency slot until upstream removed its temporary handle.
                         if (resolving === request) resolving = null
                         if (!request.canceled) {
                             try {
-                                if (bytes == null || bytes.isEmpty()) result.complete(fail("METADATA_TIMEOUT", "暂时未取得文件列表，可重试或导入种子"))
+                                val bytes = fetched.getOrNull()
+                                if (fetched.isFailure) {
+                                    Log.w(TAG, "Metadata fetch failed: ${fetched.exceptionOrNull()?.javaClass?.simpleName}")
+                                    result.complete(fail("ENGINE_UNAVAILABLE", "获取文件列表时引擎出错，请重试"))
+                                } else if (bytes == null || bytes.isEmpty()) result.complete(metadataTimeout(startedAtMs))
                                 else {
                                     val m = cacheMetadata(bytes, "magnet", info.magnet)
                                     check(info.matchesHashes(m.v1, m.v2))
@@ -422,8 +460,19 @@ class BtRuntime private constructor(private val appContext: Context) {
         }
         return result
     }
+    private fun metadataTimeout(startedAtMs: Long): Map<String, Any> {
+        val now = android.os.SystemClock.elapsedRealtime()
+        val observation = dhtObservation
+        val details = BtMetadataDiagnostics.snapshot(startedAtMs, now, observation?.nodes, observation?.observedAtMs)
+        return fail("METADATA_TIMEOUT", "暂时未取得文件列表，可重试或导入种子") + mapOf("diagnostics" to details)
+    }
     fun cancelResolve(requestId: String): Future<Map<String, Any>> = post {
-        resolving?.takeIf { it.id == requestId }?.let { cancelPreview(it) }
+        when (pendingResolveCancels.mark(requestId, android.os.SystemClock.elapsedRealtime())) {
+            BtPendingResolveCancels.MarkResult.INVALID -> return@post fail("INVALID_ARGUMENT", "解析请求标识无效")
+            BtPendingResolveCancels.MarkResult.FULL -> return@post fail("BUSY", "取消请求过多，请稍后重试")
+            BtPendingResolveCancels.MarkResult.MARKED -> Unit
+        }
+        resolving?.takeIf { it.id == requestId }?.let { cancelPreview(it); releaseIfIdle() }
         success()
     }
     private fun cancelPreview(r: Resolve) {
@@ -486,9 +535,13 @@ class BtRuntime private constructor(private val appContext: Context) {
         val parsed = if (magnet.isNotBlank()) BtInput.parse(magnet) else null
         if (parsed is BtInput.ParseResult.Fail) return@post fail(parsed.code, parsed.message)
         val key = metadataKey ?: (parsed as? BtInput.ParseResult.Ok)?.info?.dedupeKey
-        val m = metadata[key] ?: return@post fail("METADATA_MISSING", "请先重新查看文件列表")
-        if (parsed is BtInput.ParseResult.Ok && !parsed.info.matchesHashes(m.v1, m.v2))
+        val cached = metadata[key] ?: return@post fail("METADATA_MISSING", "请先重新查看文件列表")
+        if (parsed is BtInput.ParseResult.Ok && !parsed.info.matchesHashes(cached.v1, cached.v2))
             return@post fail("UNSUPPORTED_METADATA", "磁力标识与元数据不一致")
+        // Metadata may be shared across previews of the same info hash, but the
+        // current request owns its magnet and original tracker provenance.
+        val binding = BtMetadataSource.bind(cached.magnet, cached.source, (parsed as? BtInput.ParseResult.Ok)?.info)
+        val m = cached.copy(magnet = binding.magnet, source = binding.source)
         val selected = selectedIndices.toSet()
         if (selected.isEmpty()) return@post fail("NO_FILES_SELECTED", "至少选择一个文件")
         if (!selected.all { index -> m.files.any { it.fileIndex == index && !it.isPadding } })
@@ -587,8 +640,8 @@ class BtRuntime private constructor(private val appContext: Context) {
                     else if (wasPendingFailure) "BACKGROUND_START_DENIED" else t.record.errorCode))
             checkpoint(t)
         }
-        setDiscoveryEnabled(false)
-        session?.pause()
+        // A metadata preview may still own discovery even after transfer stops.
+        // releaseIfIdle handles the transition once both kinds of work are idle.
         persist(); releaseIfIdle()
     } }
     private fun onNetworkChanged(satisfied: Boolean) {
@@ -854,7 +907,7 @@ class BtRuntime private constructor(private val appContext: Context) {
             bySource = orderedBySource,
             originalKeys = originalKeys,
             excludedKeys = excludedKeys,
-            limit = config.maxSupplements.coerceIn(5, 50),
+            limit = config.maxSupplements.coerceIn(5, BtTrackerPolicy.MAX_SUPPLEMENTS),
         )
     }
 
@@ -972,8 +1025,7 @@ class BtRuntime private constructor(private val appContext: Context) {
             next = next.copy(syncIntervalHours = it.toInt().coerceIn(1, 168))
         }
         (patch["maxSupplements"] as? Number)?.let {
-            // 任务书原值 20；这里允许 5–50，超出钳制而不是报错
-            next = next.copy(maxSupplements = it.toInt().coerceIn(5, 50))
+            next = next.copy(maxSupplements = it.toInt().coerceIn(5, BtTrackerPolicy.MAX_SUPPLEMENTS))
         }
         (patch["sourceEnabled"] as? Map<*, *>)?.let { value ->
             val id = value["id"] as? String ?: throw IllegalArgumentException()
@@ -1093,13 +1145,11 @@ class BtRuntime private constructor(private val appContext: Context) {
             require(previous != null)
             commitTrackerConfig(trackerConfig.copy(sources = trackerConfig.sources.filterNot { it.id == actualId }, revision = trackerConfig.revision + 1))
         } else {
-            if (name.isBlank() || name.length > 80 || endpoints.size !in 1..2 || endpoints.any {
-                BtTrackerUrl.validateSubscriptionUrl(it) !is BtTrackerUrl.Result.Ok
-            }) return@post fail("TRACKER_SOURCE_INVALID", "来源名称或 HTTPS 地址无效")
             val builtin = BtTrackerStore.Config.defaults().sources.map { it.id }.toSet()
-            if (previous == null && actualId !in builtin && trackerConfig.sources.count { it.id !in builtin } >= 3)
+            if (previous == null && actualId !in builtin && trackerConfig.sources.count { it.id !in builtin } >= BtTrackerStore.MAX_CUSTOM_SOURCES)
                 return@post fail("TRACKER_SOURCE_LIMIT", "最多3个自定义来源")
-            val source = BtTrackerStore.SourceConfig(actualId, name.trim(), enabled, endpoints.map { it.trim() })
+            val source = BtTrackerStore.editSource(previous, actualId, name, enabled, endpoints)
+                ?: return@post fail("TRACKER_SOURCE_INVALID", "来源名称或 HTTPS 地址无效")
             val sources = if (previous == null) trackerConfig.sources + source else trackerConfig.sources.map { if (it.id == actualId) source else it }
             commitTrackerConfig(trackerConfig.copy(sources = sources, revision = trackerConfig.revision + 1))
         }
@@ -1244,7 +1294,7 @@ class BtRuntime private constructor(private val appContext: Context) {
             if (source !in ids) ids.add(source)
         }
         if (trackerConfig.customDnsValidated) trackerConfig.customPublicTrackers.forEach { add(it, "custom") }
-        trackerConfig.sources.filter { it.enabled }.forEach { source ->
+        trackerConfig.sources.filter { it.enabled && !it.isBlacklist }.forEach { source ->
             trackerCatalog?.sources?.get(source.id)?.takeIf { BtTrackerStore.usable(source, it) }?.urls?.forEach { add(it, source.id) }
         }
         if (disabledOnly) trackerConfig.disabledSupplementKeys.forEach { key ->
@@ -1492,7 +1542,7 @@ class BtRuntime private constructor(private val appContext: Context) {
         }
         // Interrupted tasks may still have an OS retry. Do not cancel that pending job,
         // but no owner means no native transfer or DHT activity may run in the meantime.
-        if (owner == null && resolving == null) {
+        if (BtSessionOwnership.shouldPause(owner != null, resolving != null)) {
             setDiscoveryEnabled(false)
             session?.pause()
         }
@@ -1711,6 +1761,7 @@ class BtRuntime private constructor(private val appContext: Context) {
             BtTransferJobService.finish(appContext); BtForegroundService.stop(appContext); networkHandle?.close()
         }.get(10, TimeUnit.SECONDS)
         trackerService.shutdown()
+        metadataWatchdog.shutdownNow()
         metadataWorker.shutdownNow(); metadataWorker.awaitTermination(5, TimeUnit.SECONDS)
         queue.submit { session?.stop(); session = null; closed = true }.get(10, TimeUnit.SECONDS)
         queue.shutdownNow()

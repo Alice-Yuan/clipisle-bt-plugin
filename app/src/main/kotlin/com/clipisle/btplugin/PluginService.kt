@@ -29,7 +29,12 @@ class PluginService : Service() {
    fun replyError(code: String) { try { reply.send(Message.obtain(null, 2).apply { data = Bundle().apply { putString("requestId", id.take(256)); putString("result", JSONObject().put("ok", false).put("code", code).toString()) } }) } catch (_: Exception) { } }
    if (!PluginProtocol.validRequest(id, method, raw)) { replyError("INVALID_ARGUMENT"); return }
    val executor = if (method in setOf("cancelResolve", "cancelTrackerSync")) cancellations else workers
+   val receivedAtMs = SystemClock.elapsedRealtime()
    try { executor.execute {
+    if (!PluginProtocol.canBeginRequest(receivedAtMs, SystemClock.elapsedRealtime())) {
+     replyError("BUSY")
+     return@execute
+    }
     val result = try { if (!HostTrust.isAuthorized(this@PluginService)) mapOf("ok" to false, "code" to "AUTHORIZATION_REQUIRED", "requestUi" to mapOf("type" to "launch", "action" to "com.clipisle.plugin.AUTHORIZE", "packageName" to packageName)) else execute(method, JSONObject(raw), reply) } catch (e: Exception) { Log.w("ClipIslePlugin", "Failed method=$method type=${e.javaClass.simpleName}"); mapOf("ok" to false, "code" to "ENGINE_UNAVAILABLE", "message" to "插件操作失败") } catch (e: LinkageError) { Log.e("ClipIslePlugin", "Native linkage failed method=$method type=${e.javaClass.simpleName}"); mapOf("ok" to false, "code" to "ENGINE_UNAVAILABLE", "message" to "插件引擎不可用") }
     val encoded = toJson(result).toString().let { if (it.toByteArray(Charsets.UTF_8).size > 512 * 1024) "{\"ok\":false,\"code\":\"RESPONSE_TOO_LARGE\"}" else it }
     try { reply.send(Message.obtain(null, 2).apply { data = Bundle().apply { putString("requestId", id); putString("result", encoded) } }) } catch (_: Exception) { subscribers.remove(reply) }
@@ -110,7 +115,13 @@ class PluginService : Service() {
    while (true) { val n = input.read(buf); if (n < 0) break; require(out.size().toLong() + n <= 16 * 1024 * 1024); out.write(buf, 0, n) }; out.toByteArray() }
  }
  private fun preview(result: Map<String, Any>, magnet: String): Any {
-  if (result["ok"] != true) return result
+  if (result["ok"] != true) {
+   val diagnostic = result["diagnostics"] as? Map<*, *>
+   val nodes = (diagnostic?.get("dhtNodes") as? Number)?.toInt()
+   Log.i("ClipIsleBT", "Metadata result code=${result["code"]} elapsedMs=${diagnostic?.get("elapsedMs")} dhtNodes=$nodes sampleAgeMs=${diagnostic?.get("dhtSampleAgeMs")}")
+   if (result["code"] == "METADATA_TIMEOUT" && nodes != null) return result + ("message" to if (nodes == 0) "暂未连接到 DHT 网络，请检查网络后重试或导入种子。" else "已连接 DHT，但暂时未取得文件列表。请稍后重试或导入种子。")
+   return result
+  }
   val files = result["files"] as? List<*> ?: emptyList<Any>()
   val paths = files.mapNotNull { (it as? Map<*, *>)?.get("path") as? String }
   val root = if (paths.size == files.size) PreviewFormat.commonRootPrefix(result["displayName"]?.toString() ?: "", paths) else ""
@@ -124,22 +135,8 @@ class PluginService : Service() {
  }
  private fun refreshed(result: Map<String, Any>, page: Any): Any =
   if (result["ok"] == true) page else result
- private fun settingsPage(): Any {
-  val settings = runtime.getSettings().get()
-  return mapOf("ok" to true, "page" to mapOf("id" to "settings", "title" to "磁力下载设置", "fields" to listOf(
-   mapOf("id" to "unmeteredOnly", "type" to "switch", "label" to "仅在非计费网络下载", "value" to (settings["unmeteredOnly"] ?: true)),
-   mapOf("id" to "maxActiveDownloads", "type" to "select", "label" to "同时下载任务", "value" to (settings["maxActiveDownloads"] ?: 1).toString(), "options" to listOf(mapOf("value" to "1", "label" to "1"), mapOf("value" to "2", "label" to "2"))),
-   mapOf("id" to "downloadRateLimit", "type" to "number", "label" to "下载限速（字节/秒，0 为不限速）", "value" to (settings["downloadRateLimit"] ?: 0)),
-   mapOf("id" to "uploadRateLimit", "type" to "number", "label" to "上传限速（字节/秒，0 为不限速）", "value" to (settings["uploadRateLimit"] ?: 0))
-  ), "items" to emptyList<Any>(), "actions" to listOf(mapOf("id" to "saveSettings", "label" to "保存", "primary" to true), mapOf("id" to "trackers", "label" to "Tracker 来源"))))
- }
- private fun trackersPage(): Any {
-  val config = runtime.getTrackerConfig().get()
-  val sources = config["sources"] as? List<*> ?: emptyList<Any>()
-  return mapOf("ok" to true, "page" to mapOf("id" to "trackers", "title" to "Tracker 来源", "fields" to listOf(mapOf("id" to "revision", "type" to "hidden", "value" to config["revision"])),
-   "items" to sources.mapNotNull { item -> val m = item as? Map<*, *> ?: return@mapNotNull null; mapOf("id" to (m["id"] ?: ""), "title" to (m["name"] ?: ""), "subtitle" to if (m["enabled"] == true) "已启用" else "已停用", "action" to "trackerSource") },
-   "actions" to listOf(mapOf("id" to "newTrackerSource", "label" to "新增来源"), mapOf("id" to "customTrackers", "label" to "自定义 Tracker"), mapOf("id" to "syncTrackers", "label" to "同步来源"), mapOf("id" to "restoreTrackers", "label" to "恢复推荐来源"))))
- }
+ private fun settingsPage(): Any = PluginSettingsPages.settings(runtime.getSettings().get())
+ private fun trackersPage(): Any = PluginSettingsPages.trackers(runtime.getTrackerConfig().get())
  private fun trackerSourcePage(source: Map<String, Any?>): Any {
   val id = source["id"]?.toString() ?: ""
   val actions = mutableListOf(mapOf("id" to "saveTrackerSource", "label" to "保存", "primary" to true))
@@ -147,7 +144,7 @@ class PluginService : Service() {
   return mapOf("ok" to true, "page" to mapOf("id" to "trackerSource", "title" to if (id.isEmpty()) "新增来源" else "编辑来源", "fields" to listOf(
    mapOf("id" to "id", "type" to "hidden", "value" to id), mapOf("id" to "revision", "type" to "hidden", "value" to source["revision"]),
    mapOf("id" to "name", "type" to "text", "label" to "名称", "value" to (source["name"] ?: "")),
-   mapOf("id" to "endpoints", "type" to "text", "label" to "HTTPS 地址（每行一个，最多两个）", "multiline" to true, "value" to ((source["endpoints"] as? List<*>)?.joinToString("\n") ?: "")),
+   mapOf("id" to "endpoints", "type" to "text", "label" to if (source["builtin"] == true) "HTTPS 地址（每行一个，最多三个）" else "HTTPS 地址（每行一个，最多两个）", "multiline" to true, "value" to ((source["endpoints"] as? List<*>)?.joinToString("\n") ?: "")),
    mapOf("id" to "enabled", "type" to "switch", "label" to "启用", "value" to (source["enabled"] ?: true))
   ), "items" to emptyList<Any>(), "actions" to actions))
  }
@@ -177,12 +174,24 @@ class PluginService : Service() {
    "settings" -> settingsPage()
    "saveSettings" -> {
     val max = values.optString("maxActiveDownloads").toIntOrNull()
-    val down = values.optString("downloadRateLimit").toIntOrNull()
-    val up = values.optString("uploadRateLimit").toIntOrNull()
-    if (max == null || max !in 1..2 || down == null || down < 0 || up == null || up < 0) mapOf("ok" to false, "code" to "INVALID_ARGUMENT", "message" to "请输入有效的并发数和非负限速")
+    val down = PluginSettingsPages.parseRate(values.opt("downloadRateLimit"))
+    val up = PluginSettingsPages.parseRate(values.opt("uploadRateLimit"))
+    if (max == null || max !in 1..2 || down == null || down < 0 || up == null || up < 0) mapOf("ok" to false, "code" to "INVALID_ARGUMENT", "message" to "请输入有效的任务数量和限速（KB/s）")
     else refreshed(runtime.updateSettings(values.optBoolean("unmeteredOnly", true), max, down, up).get(), settingsPage())
    }
    "trackers" -> trackersPage()
+   "trackerOptions" -> PluginSettingsPages.trackerOptions(runtime.getTrackerConfig().get())
+   "saveTrackerOptions" -> {
+    val interval = values.optString("syncIntervalHours").toIntOrNull()
+    val limit = values.optString("maxSupplements").toIntOrNull()
+    val revision = values.optString("revision").toIntOrNull()
+    if (interval == null || interval !in 1..168 || limit == null || limit !in 5..20 || revision == null) mapOf("ok" to false, "code" to "INVALID_ARGUMENT", "message" to "请输入有效的更新间隔和补充数量")
+    else {
+     val result = runtime.updateTrackerConfig(mapOf("autoUpdateEnabled" to values.optBoolean("autoUpdateEnabled"), "supplementsEnabled" to values.optBoolean("supplementsEnabled"), "blacklistEnabled" to values.optBoolean("blacklistEnabled"), "syncIntervalHours" to interval, "maxSupplements" to limit), revision).get()
+     refreshed(result, PluginSettingsPages.trackerOptions(runtime.getTrackerConfig().get()))
+    }
+   }
+   "confirmRestoreTrackers" -> PluginSettingsPages.confirmRestore(runtime.getTrackerConfig().get())
    "trackerSource" -> {
     val id = a.optString("itemId").ifEmpty { a.optString("id") }
     val source = runtime.getTrackerSource(id).get()

@@ -17,6 +17,9 @@ class BtTrackerStore(private val dir: File) {
 
     companion object {
         const val MAX_POOL = 1000
+        const val MAX_SOURCES = 6
+        const val MAX_CUSTOM_SOURCES = 3
+        const val MAX_SOURCE_ENDPOINTS = 4
         const val CACHE_AGE_MS = 7L * 24 * 60 * 60 * 1000
         private const val MAX_DISK_BYTES = 8L * 1024 * 1024
         private val BUILTIN_IDS = setOf("xiu2_best", "ngosang_best", "xiu2_black")
@@ -25,16 +28,17 @@ class BtTrackerStore(private val dir: File) {
             .digest(value.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
         fun validateConfig(config: Config) {
             require(config.revision > 0)
-            require(config.sources.size <= 5 && config.sources.map { it.id }.toSet().size == config.sources.size)
+            require(config.sources.size <= MAX_SOURCES && config.sources.map { it.id }.toSet().size == config.sources.size)
+            require(config.maxSupplements in 5..BtTrackerPolicy.MAX_SUPPLEMENTS)
             // 内置源不计入「自定义」配额；黑名单源与候选源分开计数
-        require(config.sources.count { it.id !in BUILTIN_IDS } <= 3)
+        require(config.sources.count { it.id !in BUILTIN_IDS } <= MAX_CUSTOM_SOURCES)
         require(config.sources.count { it.isBlacklist } <= 2)
             config.sources.forEach { s ->
                 require(ID.matches(s.id) && s.name.isNotBlank() && s.name.toByteArray().size <= 256 && s.name.none { it < ' ' })
                 // 端点数量：CDN 镜像 + 原站 + 备用，最多 4 个。
                 // 早先限制 2 个，加了 jsdelivr 镜像后放不开——大陆可达性
                 // 需要「镜像优先、原站兜底」这条链，两个端点不够。
-                require(s.endpoints.size in 1..4 && s.customEndpoints.size <= 4)
+                require(s.endpoints.size in 1..MAX_SOURCE_ENDPOINTS && s.customEndpoints.size <= MAX_SOURCE_ENDPOINTS)
                 (s.endpoints + s.customEndpoints).forEach { require(BtTrackerUrl.validateSubscriptionUrl(it) is BtTrackerUrl.Result.Ok) }
                 require(s.effectiveEndpoints().distinct().size == s.effectiveEndpoints().size)
             }
@@ -49,13 +53,26 @@ class BtTrackerStore(private val dir: File) {
             require(BtTrackerUrl.isPublicHost(p.host))
             return p
         }
+        /** Preserve built-in fallback endpoints and kind when the user edits a source. */
+        fun editSource(previous: SourceConfig?, id: String, name: String, enabled: Boolean,
+                       endpoints: List<String>): SourceConfig? {
+            if (previous != null && previous.id != id) return null
+            val clean = endpoints.map { it.trim() }
+            val unchanged = previous != null && clean == previous.effectiveEndpoints()
+            val limit = if (id in BUILTIN_IDS && unchanged) MAX_SOURCE_ENDPOINTS else 2
+            if (name.isBlank() || name.length > 80 || clean.size !in 1..limit || clean.distinct().size != clean.size ||
+                clean.any { BtTrackerUrl.validateSubscriptionUrl(it) !is BtTrackerUrl.Result.Ok }) return null
+            return if (previous == null) SourceConfig(id, name.trim(), enabled, clean)
+            else if (unchanged) previous.copy(name = name.trim(), enabled = enabled)
+            else previous.copy(name = name.trim(), enabled = enabled, customEndpoints = clean)
+        }
         fun usable(source: SourceConfig, cache: SourceCache, now: Long = System.currentTimeMillis()): Boolean = source.enabled && cache.dnsValidated &&
             cache.sourceId == source.id && !cache.isExpired(now) &&
             (cache.sourceFingerprint == source.fingerprint() || cache.sourceFingerprint.isEmpty() && cache.endpoint in source.effectiveEndpoints())
 
         fun pool(config: Config, sources: Map<String, SourceCache>, now: Long = System.currentTimeMillis()): List<String> {
             val seen = LinkedHashMap<String, String>()
-            config.sources.filter { it.enabled }.forEach { source ->
+            config.sources.filter { it.enabled && !it.isBlacklist }.forEach { source ->
                 sources[source.id]?.takeIf { usable(source, it, now) }?.urls?.forEach { url ->
                     val parsed = publicUrl(url)
                     if (parsed.canonicalKey !in config.disabledSupplementKeys && hash(parsed.canonicalKey) !in config.disabledSupplementKeys)
@@ -184,13 +201,19 @@ class BtTrackerStore(private val dir: File) {
             val repaired = LinkedHashMap(current.sources)
             current.damagedSourceIds.forEach { id -> previous?.sources?.get(id)?.let { repaired[id] = it } }
             val damaged = current.damagedSourceIds - repaired.keys
-            return LoadResult.Ok(current.copy(sources = repaired, pool = repaired.values.flatMap { it.urls }.distinct().take(MAX_POOL), damagedSourceIds = damaged))
+            return LoadResult.Ok(withCandidatePool(current.copy(sources = repaired, damagedSourceIds = damaged)))
         }
-        if (previous != null) return LoadResult.Ok(previous)
+        if (previous != null) return LoadResult.Ok(withCandidatePool(previous))
         return if (File(dir, "catalog.json").exists() || File(dir, "catalog.json.bak").exists()) LoadResult.Damaged else LoadResult.Absent
     }
+    private fun withCandidatePool(catalog: Catalog): Catalog {
+        val blacklistIds = (loadConfig() as? LoadResult.Ok)?.value?.sources
+            ?.filter { it.isBlacklist }?.map { it.id }?.toSet().orEmpty()
+        val candidates = catalog.sources.filterKeys { it !in blacklistIds }.values.flatMap { it.urls }.distinct().take(MAX_POOL)
+        return catalog.copy(pool = candidates)
+    }
     @Synchronized fun saveCatalog(catalog: Catalog) {
-        require(catalog.sources.size <= 5 && catalog.pool.size <= MAX_POOL && catalog.poolUpdatedAt >= 0 && catalog.revision >= 0)
+        require(catalog.sources.size <= MAX_SOURCES && catalog.pool.size <= MAX_POOL && catalog.poolUpdatedAt >= 0 && catalog.revision >= 0)
         catalog.sources.forEach { (id, value) -> require(id == value.sourceId); validateCache(value) }
         require(catalog.pool.map { publicUrl(it).canonicalKey }.distinct().size == catalog.pool.size)
         val json = encodeCatalog(catalog)
@@ -210,7 +233,7 @@ class BtTrackerStore(private val dir: File) {
     }
 
     private fun validateCache(c: SourceCache) {
-        require(ID.matches(c.sourceId) && c.urls.size <= 500 && c.endpointCaches.size <= 2)
+        require(ID.matches(c.sourceId) && c.urls.size <= 500 && c.endpointCaches.size <= MAX_SOURCE_ENDPOINTS)
         require(c.endpoint.isEmpty() || BtTrackerUrl.validateSubscriptionUrl(c.endpoint) is BtTrackerUrl.Result.Ok)
         require(listOf(c.lastAttemptAt, c.lastSuccessfulCheckAt, c.contentUpdatedAt, c.nextAttemptAt, c.retryAfterUntil).all { it >= 0 })
         require(c.consecutiveFailures >= 0 && c.sourceFingerprint.length <= 64)
@@ -235,7 +258,7 @@ class BtTrackerStore(private val dir: File) {
             strings(o, "customPublicTrackers"), strings(o, "disabledSupplementKeys"),
             if (o.has("customDnsValidated")) bool(o, "customDnsValidated") else false,
             if (o.has("blacklistEnabled")) bool(o, "blacklistEnabled") else true,
-            if (o.has("maxSupplements")) o.getInt("maxSupplements").coerceIn(5, 50) else 20,
+            if (o.has("maxSupplements")) o.getInt("maxSupplements").coerceIn(5, BtTrackerPolicy.MAX_SUPPLEMENTS) else 20,
             if (o.has("syncIntervalHours")) o.getInt("syncIntervalHours").coerceIn(1, 168) else 24,
             if (o.has("lastAutoSyncAt")) o.getLong("lastAutoSyncAt") else 0L,
         ).also(::validateConfig)
@@ -264,7 +287,7 @@ class BtTrackerStore(private val dir: File) {
     private fun decodeCatalog(o: JSONObject): Catalog {
         require(o.getInt("schemaVersion") == 1)
         val sources = LinkedHashMap<String, SourceCache>(); val damaged = LinkedHashSet<String>()
-        val array = o.getJSONArray("sources"); require(array.length() <= 5)
+        val array = o.getJSONArray("sources"); require(array.length() <= MAX_SOURCES)
         for (i in 0 until array.length()) {
             val s = array.getJSONObject(i); val id = s.getString("sourceId")
             require(ID.matches(id) && id !in sources && id !in damaged)

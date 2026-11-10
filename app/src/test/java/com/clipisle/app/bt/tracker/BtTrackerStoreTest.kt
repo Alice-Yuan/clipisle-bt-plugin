@@ -76,4 +76,69 @@ class BtTrackerStoreTest {
         assertTrue(cached.isExpired(99))
         assertFalse(BtTrackerStore.usable(source, cached.copy(dnsValidated = false), 101))
     }
+
+    @Test fun `editing builtin endpoints preserves fallback and blacklist policy`() {
+        val store = BtTrackerStore(temp.newFolder())
+        val defaults = BtTrackerStore.Config.defaults()
+        val builtin = defaults.sources.first { it.id == "xiu2_best" }
+        assertEquals(3, builtin.effectiveEndpoints().size)
+        val renamed = BtTrackerStore.editSource(builtin, builtin.id, "Renamed", false, builtin.effectiveEndpoints())!!
+        assertEquals(builtin.endpoints, renamed.endpoints)
+        assertEquals(builtin.customEndpoints, renamed.customEndpoints)
+        assertFalse(renamed.enabled)
+        assertNull(BtTrackerStore.editSource(builtin, builtin.id, "Renamed", true,
+            listOf("https://one.example/list", "https://two.example/list", "https://three.example/list")))
+        assertNull(BtTrackerStore.editSource(null, "custom_1", "Custom", true,
+            listOf("https://one.example/list", "https://two.example/list", "https://three.example/list")))
+        val blacklist = defaults.sources.first { it.isBlacklist }
+        val edited = BtTrackerStore.editSource(blacklist, blacklist.id, "Edited", true,
+            listOf("https://new.example/blacklist"))!!
+        assertTrue(edited.isBlacklist)
+        assertEquals(blacklist.endpoints, edited.endpoints)
+        val config = defaults.copy(revision = 2, sources = defaults.sources.map { if (it.id == edited.id) edited else it })
+        store.saveConfig(config)
+        val reloaded = (store.loadConfig() as BtTrackerStore.LoadResult.Ok).value
+        assertTrue(reloaded.sources.first { it.id == edited.id }.isBlacklist)
+        val blackCache = cache(edited.id, listOf("udp://blocked.example:6969/a")).copy(
+            sourceFingerprint = edited.fingerprint(), endpoint = edited.effectiveEndpoints()[0])
+        assertTrue(BtTrackerStore.pool(reloaded, mapOf(edited.id to blackCache), 101).isEmpty())
+        store.saveCatalog(BtTrackerStore.Catalog(mapOf(edited.id to blackCache), emptyList(), 101))
+        assertTrue((store.loadCatalog() as BtTrackerStore.LoadResult.Ok).value.pool.isEmpty())
+    }
+
+    @Test fun `three custom sources and their six cache records round trip`() {
+        val store = BtTrackerStore(temp.newFolder())
+        val defaults = BtTrackerStore.Config.defaults()
+        val extra = (1..3).map { i -> BtTrackerStore.SourceConfig("custom_$i", "Custom $i", true, listOf("https://source$i.example/list")) }
+        val config = defaults.copy(sources = defaults.sources + extra)
+        store.saveConfig(config)
+        assertEquals(6, (store.loadConfig() as BtTrackerStore.LoadResult.Ok).value.sources.size)
+        val caches = config.sources.associate { source ->
+            val entry = cache(source.id).copy(endpoint = source.effectiveEndpoints().first(), sourceFingerprint = source.fingerprint())
+            source.id to entry
+        }
+        store.saveCatalog(BtTrackerStore.Catalog(caches, emptyList(), 101))
+        assertEquals(caches.keys, (store.loadCatalog() as BtTrackerStore.LoadResult.Ok).value.sources.keys)
+        assertThrows(IllegalArgumentException::class.java) { store.saveConfig(config.copy(sources = config.sources +
+            BtTrackerStore.SourceConfig("custom_4", "Fourth", true, listOf("https://four.example/list")))) }
+    }
+
+    @Test fun `legacy supplement values are capped on load and invalid new configs are rejected`() {
+        val dir = temp.newFolder(); val store = BtTrackerStore(dir)
+        val config = BtTrackerStore.Config.defaults()
+        store.saveConfig(config)
+        val file = File(dir, "config.json")
+        file.writeText(JSONObject(file.readText()).put("maxSupplements", 50).toString())
+        assertEquals(20, (store.loadConfig() as BtTrackerStore.LoadResult.Ok).value.maxSupplements)
+        assertThrows(IllegalArgumentException::class.java) { store.saveConfig(config.copy(maxSupplements = 50)) }
+    }
+
+    @Test fun `catalog preserves cache for every builtin fallback endpoint`() {
+        val store = BtTrackerStore(temp.newFolder())
+        val source = BtTrackerStore.Config.defaults().sources.first()
+        val entries = source.endpoints.associateWith { BtTrackerStore.EndpointCache(listOf("udp://tracker.example.org:6969/a"), null, null, 100) }
+        val record = cache(source.id).copy(endpoint = source.endpoints.first(), endpointCaches = entries)
+        store.saveCatalog(BtTrackerStore.Catalog(mapOf(source.id to record), record.urls, 101))
+        assertEquals(entries, (store.loadCatalog() as BtTrackerStore.LoadResult.Ok).value.sources.getValue(source.id).endpointCaches)
+    }
 }

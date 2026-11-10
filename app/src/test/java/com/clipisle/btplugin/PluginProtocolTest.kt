@@ -2,6 +2,13 @@ package com.clipisle.btplugin
 import org.junit.Assert.*
 import org.junit.Test
 class PluginProtocolTest {
+ @Test fun expiresQueuedRequestsBeforeCancellationMarkersCanExpire() {
+  assertTrue(PluginProtocol.canBeginRequest(1000L, 1000L))
+  assertTrue(PluginProtocol.canBeginRequest(1000L, 21000L))
+  assertFalse(PluginProtocol.canBeginRequest(1000L, 21001L))
+  assertFalse(PluginProtocol.canBeginRequest(1000L, 181000L))
+  assertFalse(PluginProtocol.canBeginRequest(1000L, 999L))
+ }
  @Test fun boundsRequestsBeforeParsing() {
   assertTrue(PluginProtocol.validRequest("id", "parseInput", "{}"))
   assertFalse(PluginProtocol.validRequest("", "parseInput", "{}"))
