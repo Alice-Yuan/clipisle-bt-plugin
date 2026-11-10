@@ -1,0 +1,15 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+ <uses-permission android:name="android.permission.INTERNET"/><uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+ <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/><uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+ <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/><uses-permission android:name="android.permission.WAKE_LOCK"/><uses-permission android:name="android.permission.RUN_USER_INITIATED_JOBS"/>
+ <queries><package android:name="com.clipisle.app"/></queries>
+ <application android:label="ClipIsle BT" android:allowBackup="false" android:largeHeap="true" android:usesCleartextTraffic="true">
+  <activity android:name=".PluginAccessActivity" android:exported="true"><intent-filter><action android:name="com.clipisle.plugin.AUTHORIZE"/><category android:name="android.intent.category.DEFAULT"/></intent-filter></activity>
+  <activity android:name=".TransferConfirmActivity" android:exported="true"><intent-filter><action android:name="com.clipisle.plugin.CONFIRM_TRANSFER"/><category android:name="android.intent.category.DEFAULT"/></intent-filter></activity>
+  <service android:name=".PluginService" android:exported="true"><intent-filter><action android:name="com.clipisle.plugin.BIND"/></intent-filter><meta-data android:name="com.clipisle.plugin.manifest" android:resource="@string/plugin_manifest"/></service>
+  <provider android:name=".ExportProvider" android:authorities="com.clipisle.btplugin.exports" android:exported="false" android:grantUriPermissions="true"/>
+  <receiver android:name="com.clipisle.app.bt.BtNotificationReceiver" android:exported="false"/>
+  <service android:name="com.clipisle.app.bt.BtForegroundService" android:exported="false" android:foregroundServiceType="dataSync"/>
+  <service android:name="com.clipisle.app.bt.BtTransferJobService" android:exported="false" android:permission="android.permission.BIND_JOB_SERVICE"/>
+ </application>
+</manifest>

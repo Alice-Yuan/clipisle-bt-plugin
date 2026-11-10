@@ -1,0 +1,24 @@
+{
+  "audited": "2026-11-08",
+  "jlibtorrentRelease": "release/2.0.15.3",
+  "files": {
+    "jlibtorrent-LICENSE.txt": "https://github.com/frostwire/frostwire-jlibtorrent/blob/release/2.0.15.3/LICENSE.md",
+    "libtorrent-LICENSE.txt": "https://github.com/arvidn/libtorrent/blob/eb397173da6189dad52f008916c27419dde32faa/LICENSE",
+    "libtorrent-COPYING.txt": "https://github.com/arvidn/libtorrent/blob/eb397173da6189dad52f008916c27419dde32faa/COPYING",
+    "boost-LICENSE.txt": "https://github.com/boostorg/boost/blob/boost-1.88.0/LICENSE_1_0.txt",
+    "openssl-LICENSE.txt": "https://github.com/openssl/openssl/blob/openssl-4.1.0/LICENSE.txt",
+    "try-signal-LICENSE.txt": "https://github.com/arvidn/try_signal/blob/105cce59972f925a33aa6b1c3109e4cd3caf583d/LICENSE",
+    "swig-runtime-LICENSE.txt": "https://github.com/swig/swig/blob/v4.5.1/LICENSE",
+    "swig-COPYRIGHT.txt": "https://github.com/swig/swig/blob/v4.5.1/COPYRIGHT",
+    "swig-LICENSE-UNIVERSITIES.txt": "https://github.com/swig/swig/blob/v4.5.1/LICENSE-UNIVERSITIES",
+    "libcxx-LICENSE.txt": "https://github.com/llvm/llvm-project/blob/3b5e7c83a6e226d5bd7ed2e9b67449b64812074c/libcxx/LICENSE.TXT",
+    "libcxxabi-LICENSE.txt": "https://github.com/llvm/llvm-project/blob/3b5e7c83a6e226d5bd7ed2e9b67449b64812074c/libcxxabi/LICENSE.TXT",
+    "libunwind-LICENSE.txt": "https://github.com/llvm/llvm-project/blob/3b5e7c83a6e226d5bd7ed2e9b67449b64812074c/libunwind/LICENSE.TXT",
+    "compiler-rt-LICENSE.txt": "https://github.com/llvm/llvm-project/blob/3b5e7c83a6e226d5bd7ed2e9b67449b64812074c/compiler-rt/LICENSE.TXT",
+    "okhttp-LICENSE.txt": "https://github.com/square/okhttp/blob/parent-4.12.0/LICENSE.txt",
+    "okio-LICENSE.txt": "https://github.com/square/okio/blob/3.9.1/LICENSE.txt"
+  },
+  "trackerDependenciesAudited": "2026-11-09",
+  "okHttpVersion": "4.12.0",
+  "okioResolvedVersion": "3.9.1"
+}
