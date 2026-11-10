@@ -158,9 +158,15 @@ class PluginService : Service() {
   ), "items" to emptyList<Any>(), "actions" to listOf(mapOf("id" to "saveCustomTrackers", "label" to "保存并验证", "primary" to true))))
  }
  private fun trackerSyncPage(state: Map<String, Any>): Any {
-  val status = state["state"]?.toString() ?: "running"
+  val status = when (state["state"]?.toString()) {
+   "running" -> "同步中"
+   "completed", "succeeded" -> "同步完成"
+   "failed" -> "同步失败"
+   "canceled", "cancelled" -> "已取消"
+   else -> "未知状态"
+  }
   return mapOf("ok" to true, "page" to mapOf("id" to "trackerSync", "title" to "Tracker 同步", "fields" to listOf(mapOf("id" to "operationId", "type" to "hidden", "value" to (state["operationId"] ?: ""))),
-   "items" to listOf(mapOf("id" to "status", "title" to "状态：$status")), "actions" to listOf(mapOf("id" to "refreshTrackerSync", "label" to "刷新状态"), mapOf("id" to "cancelTrackerSync", "label" to "取消同步"), mapOf("id" to "trackers", "label" to "返回来源"))))
+   "items" to listOf(mapOf("id" to "status", "title" to status)), "actions" to listOf(mapOf("id" to "refreshTrackerSync", "label" to "刷新状态"), mapOf("id" to "cancelTrackerSync", "label" to "取消同步"), mapOf("id" to "trackers", "label" to "返回来源"))))
  }
  private fun invokeAction(a: JSONObject, reply: Messenger): Any? {
   val action = a.optString("action"); val values = a.optJSONObject("values") ?: JSONObject()
@@ -198,7 +204,7 @@ class PluginService : Service() {
     val result = runtime.syncTrackers(true).get()
     if (result["ok"] == true && result["operationId"] != null) trackerSyncPage(result) else result
    }
-   "refreshTrackerSync" -> { val result = runtime.getTrackerSyncState(values.optString("operationId")).get(); if (result["ok"] == true) trackerSyncPage(result) else result }
+   "refreshTrackerSync" -> { val result = runtime.getTrackerSyncState(values.optString("operationId")).get(); if (result["operationId"] != null) trackerSyncPage(result) else result }
    "cancelTrackerSync" -> { val result = runtime.cancelTrackerSync(values.optString("operationId")).get(); if (result["ok"] == true) refreshed(result, trackersPage()) else result }
    else -> mapOf("ok" to false, "code" to "UNKNOWN_ACTION")
   }
