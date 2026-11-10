@@ -68,6 +68,7 @@ class PluginService : Service() {
    "subscribe" -> synchronized(subscribers) { if (subscribers.size >= 8 && !subscribers.contains(reply)) mapOf("ok" to false, "code" to "BUSY") else { subscribers.add(reply); mapOf("ok" to true) } }
    "unsubscribe" -> { subscribers.remove(reply); mapOf("ok" to true) }
    "invokeAction" -> invokeAction(a, reply)
+   "lookupPreview" -> PreviewPage.build(PreviewLookup.lookup(str("input")))
    "parseInput" -> { val input = str("input"); if (input.startsWith("magnet:")) preview(runtime.resolveMagnet(input, a.optString("requestId").takeIf { it.isNotBlank() && it.length <= 256 } ?: UUID.randomUUID().toString(), 90000).get(), input) else if (input.startsWith("clipisle-torrent:content://")) preview(runtime.importTorrent(readTorrent(input.removePrefix("clipisle-torrent:")), UUID.randomUUID().toString(), "").get(), "") else mapOf("ok" to false, "code" to "UNSUPPORTED_INPUT") }
    "capabilities" -> runtime.capabilities().get()
    "load" -> mapOf("ok" to true, "taskCount" to runtime.loadFromDisk().get())
@@ -169,6 +170,7 @@ class PluginService : Service() {
   val action = a.optString("action"); val values = a.optJSONObject("values") ?: JSONObject()
   return when (action) {
    "parseInput" -> { val input = a.optString("input").ifEmpty { values.optString("input") }; execute("parseInput", JSONObject().put("input", input).put("requestId", a.optString("requestId")), reply) }
+   "lookupPreview", "preview" -> PreviewPage.build(PreviewLookup.lookup(a.optString("input").ifEmpty { values.optString("input") }))
    "importTorrent" -> if (!a.has("uri")) mapOf("ok" to true, "requestUi" to mapOf("type" to "pickFile", "mimeTypes" to listOf("application/x-bittorrent"), "resultAction" to "importTorrent")) else { val bytes = readTorrent(a.getString("uri")); val result = runtime.importTorrent(bytes, UUID.randomUUID().toString(), a.optString("displayName")).get(); preview(result, "") }
    "enqueue" -> { val indices = a.optJSONArray("selectedFileIndices") ?: values.optJSONArray("selectedFileIndices") ?: JSONArray(); val args = JSONObject().put("selectedFileIndices", indices).put("metadataKey", values.optString("metadataKey")).put("magnet", values.optString("magnet")).put("taskId", UUID.randomUUID().toString()); val r = execute("enqueue", args, reply) as Map<*, *>; if (r.containsKey("requestUi")) r else if (r["ok"] == true) mapOf("ok" to true, "message" to "已添加下载", "navigate" to "downloads") else r }
    "settings" -> settingsPage()
