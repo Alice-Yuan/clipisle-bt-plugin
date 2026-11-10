@@ -14,5 +14,5 @@ if not a.allow_debug and 'CN=Android Debug' in result.stdout:
 match = re.search(r'Signer #1 certificate SHA-256 digest:\s*([0-9a-fA-F:]+)', result.stdout)
 if not match or 'Signer #2 certificate' in result.stdout:
     raise SystemExit('Expected exactly one APK signing certificate')
-data = {'formatVersion': 1, 'id': 'com.clipisle.bt', 'name': '磁力 / BT 下载', 'version': '1.0.0', 'packageName': 'com.clipisle.btplugin', 'apiVersion': 1, 'apk': {'url': a.url, 'sha256': hashlib.sha256(a.apk.read_bytes()).hexdigest(), 'certificateSha256': match.group(1).replace(':', '').lower()}, 'permissions': ['internet', 'networkState', 'backgroundTransfer', 'notifications']}
+data = {'formatVersion': 1, 'id': 'com.clipisle.bt', 'name': '磁力 / BT 下载', 'version': '1.0.1', 'packageName': 'com.clipisle.btplugin', 'apiVersion': 1, 'apk': {'url': a.url, 'sha256': hashlib.sha256(a.apk.read_bytes()).hexdigest(), 'certificateSha256': match.group(1).replace(':', '').lower()}, 'permissions': ['internet', 'networkState', 'backgroundTransfer', 'notifications']}
 a.output.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')

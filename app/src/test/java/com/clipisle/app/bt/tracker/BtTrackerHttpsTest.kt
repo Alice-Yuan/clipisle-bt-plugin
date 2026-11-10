@@ -96,7 +96,10 @@ class BtTrackerHttpsTest {
         } finally { client.shutdown() }
     }
 
-    @Test fun `cancel aborts an actual waiting socket`() = fixture { server, http ->
+    @Test fun `cancel aborts an actual waiting socket`() = assertCancellation(true)
+    @Test fun `cancel without interrupt also aborts an actual waiting socket`() = assertCancellation(false)
+
+    private fun assertCancellation(interrupt: Boolean) = fixture { server, http ->
         server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
         val failed = CountDownLatch(1)
         val headersSent = CountDownLatch(1)
@@ -112,11 +115,20 @@ class BtTrackerHttpsTest {
             val future = client.fetch(url(server))
             assertNotNull(server.takeRequest(2, TimeUnit.SECONDS))
             assertTrue("request headers were not sent", headersSent.await(2, TimeUnit.SECONDS))
-            assertTrue("future should accept cancellation", future.cancel(true))
+            assertTrue("future should accept cancellation", future.cancel(interrupt))
             assertTrue("underlying OkHttp call must be canceled", activeCall.get().isCanceled())
             assertTrue("canceled call must finish with failure", failed.await(5, TimeUnit.SECONDS))
             assertTrue(future.isCancelled)
         } finally { client.shutdown() }
+    }
+
+    @Test fun `cancellation rejects a call published after cancellation`() {
+        val gate = BtTrackerCallGate()
+        assertNull(gate.requestCancel())
+        val call = OkHttpClient().newCall(okhttp3.Request.Builder().url("https://catalog.example/list").build())
+        assertFalse("late call must not be executed", gate.publish(call))
+        assertTrue("late call must be canceled", call.isCanceled())
+        assertFalse("late call must not have started", call.isExecuted())
     }
 
     @Test fun `total endpoint deadline closes stalled response`() = fixture { server, http ->

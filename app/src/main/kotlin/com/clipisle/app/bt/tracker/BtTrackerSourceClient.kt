@@ -135,12 +135,26 @@ open class BtTrackerSourceClient(
     open fun fetch(endpoint: String, etag: String? = null, lastModified: String? = null,
                    timeoutMs: Long = ENDPOINT_TIMEOUT_MS.toLong()): Future<EndpointResult> {
         val call = AtomicReference<Call?>()
+        val gate = BtTrackerCallGate()
         val task = object : FutureTask<EndpointResult>(Callable {
             val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs.coerceIn(1, ENDPOINT_TIMEOUT_MS.toLong()))
-            try { fetchInternal(endpoint, etag, lastModified, deadline, call) }
+            try { fetchInternal(endpoint, etag, lastModified, deadline, call, gate) }
             catch (_: Exception) { EndpointResult.Fail(if (Thread.currentThread().isInterrupted || System.nanoTime() >= deadline) "timeout" else "network") }
         }) {
-            override fun cancel(mayInterruptIfRunning: Boolean): Boolean { call.get()?.cancel(); return super.cancel(mayInterruptIfRunning) }
+            override fun cancel(mayInterruptIfRunning: Boolean): Boolean {
+                val current = gate.current()
+                // Mark the Future canceled first: either interruption or a visible
+                // cancellation flag can otherwise make the worker complete first.
+                val accepted = super.cancel(mayInterruptIfRunning)
+                if (accepted) {
+                    // A call published before this flag is captured here; a later
+                    // publication observes the flag and cancels itself.
+                    val published = gate.requestCancel()
+                    current?.cancel()
+                    if (published !== current) published?.cancel()
+                }
+                return accepted
+            }
             override fun done() { active.remove(this) }
         }
         active[task] = call
@@ -148,9 +162,9 @@ open class BtTrackerSourceClient(
         return task
     }
     private fun fetchInternal(endpoint: String, etag: String?, modified: String?, deadline: Long,
-                              activeCall: AtomicReference<Call?>): EndpointResult {
+                              activeCall: AtomicReference<Call?>, gate: BtTrackerCallGate): EndpointResult {
         fun remaining(): Long {
-            if (Thread.currentThread().isInterrupted) throw IOException("Cancelled")
+            if (gate.isCancelled() || Thread.currentThread().isInterrupted) throw IOException("Cancelled")
             val left = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime())
             if (left <= 0) throw IOException("Timeout")
             return left
@@ -176,8 +190,9 @@ open class BtTrackerSourceClient(
             }
             val call = http.newCall(request.build())
             call.timeout().timeout(remaining(), TimeUnit.MILLISECONDS)
+            if (!gate.publish(call)) throw IOException("Cancelled")
             activeCall.set(call)
-            if (Thread.currentThread().isInterrupted) { call.cancel(); throw IOException("Cancelled") }
+            if (gate.isCancelled() || Thread.currentThread().isInterrupted) { call.cancel(); gate.clear(call); activeCall.compareAndSet(call, null); throw IOException("Cancelled") }
             try {
                 call.execute().use { response ->
                     when {
@@ -226,7 +241,7 @@ open class BtTrackerSourceClient(
                         }
                     }
                 }
-            } finally { activeCall.compareAndSet(call, null) }
+            } finally { gate.clear(call); activeCall.compareAndSet(call, null) }
         }
         return EndpointResult.Fail("too_many_redirects")
     }
