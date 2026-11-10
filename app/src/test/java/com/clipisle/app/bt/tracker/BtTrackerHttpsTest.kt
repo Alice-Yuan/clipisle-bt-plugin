@@ -17,6 +17,7 @@ import java.io.IOException
 import java.net.InetAddress
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import java.util.zip.GZIPOutputStream
 
 /** Real HTTPS over a local socket; only injected test dependencies allow the loopback destination. */
@@ -98,14 +99,23 @@ class BtTrackerHttpsTest {
     @Test fun `cancel aborts an actual waiting socket`() = fixture { server, http ->
         server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
         val failed = CountDownLatch(1)
+        val headersSent = CountDownLatch(1)
+        val activeCall = AtomicReference<Call>()
         val client = client(http.newBuilder().eventListener(object : EventListener() {
+            override fun requestHeadersEnd(call: Call, request: okhttp3.Request) {
+                activeCall.set(call)
+                headersSent.countDown()
+            }
             override fun callFailed(call: Call, ioe: IOException) { failed.countDown() }
         }).build())
         try {
             val future = client.fetch(url(server))
             assertNotNull(server.takeRequest(2, TimeUnit.SECONDS))
-            future.cancel(true)
-            assertTrue(failed.await(2, TimeUnit.SECONDS)); assertTrue(future.isCancelled)
+            assertTrue("request headers were not sent", headersSent.await(2, TimeUnit.SECONDS))
+            assertTrue("future should accept cancellation", future.cancel(true))
+            assertTrue("underlying OkHttp call must be canceled", activeCall.get().isCanceled())
+            assertTrue("canceled call must finish with failure", failed.await(5, TimeUnit.SECONDS))
+            assertTrue(future.isCancelled)
         } finally { client.shutdown() }
     }
 
